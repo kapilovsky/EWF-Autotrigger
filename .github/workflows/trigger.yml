@@ -25,5 +25,6 @@ jobs:
       env:
         VARICENT_EMAIL: ${{ secrets.VARICENT_EMAIL}}
         VARICENT_PASSWORD: ${{secrets.VARICENT_PASSWORD}}
+        BEARER_TOKEN: ${{secrets.BEARER_TOKEN}}
       run: python script.py
     
