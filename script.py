@@ -8,10 +8,12 @@ from zoneinfo import ZoneInfo
 VARICENT_EMAIL = os.getenv("VARICENT_EMAIL")
 VARICENT_PASSWORD = os.getenv("VARICENT_PASSWORD")
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
+if not BEARER_TOKEN:
+    raise ValueError("BEARER_TOKEN environment variable is missing")
 API_URL = "https://wdc.spm.varicent.com/api/v1/"
 CONST_TABLE_NAME = "customtables/tblEWFWorkflowTriggerRequest/inputforms/0/data"
 PAYEE_WORKFLOW_URL = (
-    "https://incentiveplus1.spm.varicent.com/api/v1/payee/workflows/39/initiate"
+    "https://incentivepluse1.spm.varicent.com/api/v1/payee/workflows/39/initiate"
 )
 
 TOKEN_CACHE = {"token": None, "expiry": 0}
@@ -24,7 +26,7 @@ def get_authenticated_session():
 
 
 def login(session):
-    url = "https://incentiveplus1.spm.varicent.com/services/v2/payeeweb/login"
+    url = "https://incentivepluse1.spm.varicent.com/services/v2/payeeweb/login"
 
     payload = {
         "email": VARICENT_EMAIL,
@@ -38,7 +40,7 @@ def login(session):
 
     resp = session.post(url, json=payload, headers=headers, timeout=30)
 
-    if resp.status_code == 200:
+    if resp.status_code != 200:
         raise Exception(f"Login failed: {resp.status_code} {resp.text}")
 
     data = resp.json()
@@ -72,7 +74,7 @@ def get_headers(session):
 
 
 header = {
-    "Authorization": "Bearer icm-lXtiwcULyJEiQ1TBbX97sAjKpsb7bykaI2DL0wsDpSM=",
+    "Authorization": f"Bearer {BEARER_TOKEN}",
     "Content-Type": "application/json; charset=UTF-8",
     "Model": "AmexDEVB",
 }
@@ -97,11 +99,8 @@ def fetch_tablelookup_data(session):
 
         df = pd.DataFrame(rows)
 
-        df[4] = df[4].astype(str)
-
-        df = df[df[4].str.upper() == "YES"]
-
         return df
+
     except Exception as e:
         print(f"Failed to fetch table data: {e}")
         return None
@@ -135,6 +134,60 @@ def trigger_workflow(session):
         print(f"Failed to trigger workflow: {e}")
 
 
+def clear_yes_flag(session, df):
+    """
+    If column 5 contains YES, patch the same row and set column 5 to null.
+    Assumes only one row exists in the table.
+    """
+    url = API_URL + CONST_TABLE_NAME
+
+    try:
+
+        # First (and only) row from dataframe
+        old_row = df.iloc[0].tolist()
+
+        # New row = exact same row, only col index 4 becomes None (JSON null)
+        new_row = old_row.copy()
+        new_row[4] = None
+
+        payload = {
+            "oldRows": [old_row],
+            "rows": [new_row],
+            "inputFormId": 0,
+            "effectiveDate": None,
+            "overwrite": [None],
+        }
+
+        print("Clearing YES flag from table...")
+
+        resp = session.patch(
+            url,
+            headers=header,
+            json=payload,
+            timeout=60,
+        )
+
+        # Retry once if token expired
+        if resp.status_code == 401:
+            print("Token expired, logging in again")
+            login(session)
+
+            resp = session.patch(
+                url,
+                headers=header,
+                json=payload,
+                timeout=60,
+            )
+
+        if resp.status_code not in [200, 204]:
+            raise Exception(f"Failed to clear YES flag: {resp.status_code} {resp.text}")
+
+        print("YES flag cleared successfully")
+
+    except Exception as e:
+        print(f"Failed to clear YES flag: {e}")
+
+
 def run_scheduler():
     session = get_authenticated_session()
     print("Job Started")
@@ -147,22 +200,33 @@ def run_scheduler():
             return
 
         # use IST for time comparision
-        now = datetime.datetime.now(IST)
-        current_date_str = now.strftime("%Y-%m-%dT00:00:00")
-        current_time_str = now.strftime("%I:%M %p IST").lstrip("0")
+        # now = datetime.datetime.now(IST)
+        # current_date_str = now.strftime("%Y-%m-%dT00:00:00")
+        # current_time_str = now.strftime("%I:%M %p IST").lstrip("0")
 
         # filter col1=date col2 =time col4 = yes
-        match = df[
-            (df[1] == current_date_str)
-            & (df[2].str.lstrip("0") == current_time_str)
-            & (df[4].str.upper() == "YES")
-        ]
+        # match = df[
+        #     (df[1] == current_date_str)
+        #     & (df[2].str.lstrip("0") == current_time_str)
+        #     & (df[4].str.upper() == "YES")
+        # ]
 
-        if not match.empty:
-            print("Match found, Triggering workflow")
+        # if not match.empty:
+        #     print("Match found, Triggering workflow")
+        #     trigger_workflow(session)
+        # else:
+        #     print("No match found")
+
+        # Since there is always one row, check column 4 directly
+
+        trigger_flag = str(df.iloc[0, 4]).strip().upper()
+
+        if trigger_flag == "YES":
+            print("YES found, triggering workflow")
             trigger_workflow(session)
+            clear_yes_flag(session, df)
         else:
-            print("No match found")
+            print("Trigger flag is not YES")
     except Exception as e:
         print(f"Failed to run scheduler: {e}")
 
